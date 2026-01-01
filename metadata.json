@@ -1,0 +1,8 @@
+{
+  "name": "TaskFlow AI",
+  "description": "A smart voice-activated task manager that listens to conversations, extracts action items, and prioritizes them using Gemini 2.5 and 3.0 models.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation"
+  ]
+}
