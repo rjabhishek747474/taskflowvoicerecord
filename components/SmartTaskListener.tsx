@@ -4,8 +4,14 @@ import { transcribeAudio, analyzeTasksFromText, generateSpeechBase64 } from '../
 import { Task, TaskPriority } from '../types';
 import TaskCard from './TaskCard';
 import { base64ToUint8Array, decodeAudioData } from '../services/audioUtils';
+import { db, Recording } from '../db';
+import HistoryViewer from './HistoryViewer';
 
-const SmartTaskListener: React.FC = () => {
+interface SmartTaskListenerProps {
+  onChatRequest?: (context: string) => void;
+}
+
+const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [processingState, setProcessingState] = useState<'idle' | 'transcribing' | 'thinking' | 'done' | 'error'>('idle');
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -78,9 +84,22 @@ const SmartTaskListener: React.FC = () => {
       const extractedTasks = await analyzeTasksFromText(text);
 
       setTasks(prev => [...extractedTasks, ...prev]); // Add new tasks to top
+
+      // 3. Save to History (DB)
+      const newRecordingId = await db.recordings.add({
+        transcript: text,
+        timestamp: new Date().toISOString(),
+        summary: extractedTasks.length > 0 ? `Detected ${extractedTasks.length} tasks` : undefined
+      });
+
+      // Save extracted tasks
+      if (extractedTasks.length > 0) {
+        await db.tasks.bulkAdd(extractedTasks);
+      }
+
       setProcessingState('done');
 
-      // 3. Notify high priority
+      // 4. Notify high priority
       const criticalTasks = extractedTasks.filter(t => t.priority === 'Critical' || t.priority === 'High');
       if (criticalTasks.length > 0 && Notification.permission === "granted") {
         new Notification("New High Priority Tasks Detected", {
@@ -123,10 +142,23 @@ const SmartTaskListener: React.FC = () => {
 
   const toggleTask = (id: string) => {
     setTasks(tasks.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
+    // Update DB (optimistic)
+    const task = tasks.find(t => t.id === id);
+    if (task) {
+      db.tasks.update(id, { completed: !task.completed });
+    }
   };
 
   const updateTask = (id: string, updates: Partial<Task>) => {
     setTasks(tasks.map(t => t.id === id ? { ...t, ...updates } : t));
+    db.tasks.update(id, updates);
+  };
+
+  const handleHistorySelect = (rec: Recording) => {
+    setTranscript(rec.transcript);
+    // Note: We don't verify if tasks belong to recording yet as we don't link them perfectly in schema
+    // But for now, we just show the transcript.
+    // In future, link tasks to recordingId.
   };
 
   const processedTasks = useMemo(() => {
@@ -157,127 +189,134 @@ const SmartTaskListener: React.FC = () => {
   }, [tasks, filter, sort]);
 
   return (
-    <div className="max-w-4xl mx-auto p-6">
-      <div className="mb-8 text-center">
-        <h2 className="text-3xl font-bold mb-4 bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
-          Conversation Intelligence
-        </h2>
-        <p className="text-slate-400 mb-8">
-          Record your meetings or thoughts. Gemini 2.5 Flash will transcribe, and Gemini 3.0 Pro will think deeply to prioritize your tasks.
-        </p>
+    <div className="flex gap-6 h-[calc(100vh-8rem)]">
+      {/* Sidebar: History */}
+      <div className="w-80 h-full hidden lg:block">
+        <HistoryViewer
+          onSelect={handleHistorySelect}
+          onChat={(rec) => onChatRequest?.(rec.transcript)}
+        />
+      </div>
 
-        <div className="flex justify-center mb-6">
-          {!isRecording ? (
-            <button
-              onClick={startRecording}
-              className="flex items-center gap-2 px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-semibold shadow-lg shadow-indigo-500/30 transition-all transform hover:scale-105"
-            >
-              <Mic className="w-6 h-6" />
-              Start Listening
-            </button>
-          ) : (
-            <button
-              onClick={stopRecording}
-              className="flex items-center gap-2 px-8 py-4 bg-rose-600 hover:bg-rose-500 text-white rounded-full font-semibold shadow-lg shadow-rose-500/30 animate-pulse"
-            >
-              <Square className="w-6 h-6 fill-current" />
-              Stop Recording
-            </button>
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col gap-6 overflow-y-auto pr-2 custom-scrollbar">
+
+        <div className="text-center mb-4">
+          <h2 className="text-3xl font-bold mb-4 bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
+            Conversation Intelligence
+          </h2>
+          <div className="flex justify-center mb-6">
+            {!isRecording ? (
+              <button
+                onClick={startRecording}
+                className="flex items-center gap-2 px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full font-semibold shadow-lg shadow-indigo-500/30 transition-all transform hover:scale-105"
+              >
+                <Mic className="w-6 h-6" />
+                Start Listening
+              </button>
+            ) : (
+              <button
+                onClick={stopRecording}
+                className="flex items-center gap-2 px-8 py-4 bg-rose-600 hover:bg-rose-500 text-white rounded-full font-semibold shadow-lg shadow-rose-500/30 animate-pulse"
+              >
+                <Square className="w-6 h-6 fill-current" />
+                Stop Recording
+              </button>
+            )}
+          </div>
+
+          {processingState !== 'idle' && processingState !== 'done' && processingState !== 'error' && (
+            <div className="flex flex-col items-center gap-3 animate-fade-in p-4 bg-slate-900/80 rounded-xl border border-indigo-500/30 backdrop-blur-sm max-w-sm mx-auto">
+              <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+              <p className="text-cyan-300 font-medium">
+                {processingState === 'transcribing' && "Transcribing audio..."}
+                {processingState === 'thinking' && "Analyzing & Prioritizing..."}
+              </p>
+            </div>
+          )}
+
+          {errorMsg && (
+            <div className="flex items-center justify-center gap-2 text-rose-400 mt-4 bg-rose-900/20 p-2 rounded-lg inline-block px-4">
+              <AlertCircle className="w-5 h-5" />
+              <span>{errorMsg}</span>
+            </div>
           )}
         </div>
 
-        {processingState !== 'idle' && processingState !== 'done' && processingState !== 'error' && (
-          <div className="flex flex-col items-center gap-3 animate-fade-in">
-            <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
-            <p className="text-cyan-300 font-medium">
-              {processingState === 'transcribing' && "Transcribing audio..."}
-              {processingState === 'thinking' && "Analyzing & Prioritizing (Thinking Mode)..."}
-            </p>
-          </div>
-        )}
-
-        {errorMsg && (
-          <div className="flex items-center justify-center gap-2 text-rose-400 mt-4">
-            <AlertCircle className="w-5 h-5" />
-            <span>{errorMsg}</span>
-          </div>
-        )}
-      </div>
-
-      <div className="grid md:grid-cols-2 gap-8">
-        {/* Transcript Area */}
-        <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-800">
-          <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4">Live Transcript</h3>
-          <div className="h-[400px] overflow-y-auto text-slate-300 space-y-2 font-mono text-sm leading-relaxed">
-            {transcript ? transcript : <span className="text-slate-600 italic">Recording transcript will appear here...</span>}
-          </div>
-        </div>
-
-        {/* Tasks Area */}
-        <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-800 flex flex-col">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider">Identified Tasks</h3>
-              <Sparkles className="w-4 h-4 text-amber-400" />
-            </div>
-            <div className="text-xs text-slate-500">
-              {processedTasks.length} {processedTasks.length === 1 ? 'task' : 'tasks'}
+        <div className="grid md:grid-cols-2 gap-8 flex-1">
+          {/* Transcript Area */}
+          <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-800 flex flex-col">
+            <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider mb-4">Live Transcript</h3>
+            <div className="flex-1 overflow-y-auto text-slate-300 space-y-2 font-mono text-sm leading-relaxed custom-scrollbar min-h-[300px]">
+              {transcript ? transcript : <span className="text-slate-600 italic">Recording transcript will appear here...</span>}
             </div>
           </div>
 
-          {/* Filters & Sorting */}
-          <div className="flex gap-2 mb-4">
-            <div className="relative flex-1">
-              <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
-                <Filter className="w-4 h-4 text-slate-400" />
+          {/* Tasks Area */}
+          <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-800 flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <h3 className="text-slate-400 text-sm font-semibold uppercase tracking-wider">Identified Tasks</h3>
+                <Sparkles className="w-4 h-4 text-amber-400" />
               </div>
-              <select
-                value={filter}
-                onChange={(e) => setFilter(e.target.value as any)}
-                className="bg-slate-800 border border-slate-700 text-slate-300 text-xs rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full pl-9 p-2 appearance-none cursor-pointer"
-              >
-                <option value="all">All Tasks</option>
-                <option value="active">Active</option>
-                <option value="completed">Completed</option>
-              </select>
-            </div>
-            <div className="relative flex-1">
-              <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
-                <ArrowUpDown className="w-4 h-4 text-slate-400" />
+              <div className="text-xs text-slate-500">
+                {processedTasks.length} {processedTasks.length === 1 ? 'task' : 'tasks'}
               </div>
-              <select
-                value={sort}
-                onChange={(e) => setSort(e.target.value as any)}
-                className="bg-slate-800 border border-slate-700 text-slate-300 text-xs rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full pl-9 p-2 appearance-none cursor-pointer"
-              >
-                <option value="newest">Newest</option>
-                <option value="priority">Priority</option>
-                <option value="date">Due Date</option>
-              </select>
             </div>
-          </div>
 
-          <div className="h-[350px] overflow-y-auto space-y-3">
-            {processedTasks.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-slate-600">
-                <p>{tasks.length === 0 ? "No tasks identified yet." : "No tasks match filter."}</p>
+            {/* Filters & Sorting */}
+            <div className="flex gap-2 mb-4">
+              <div className="relative flex-1">
+                <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+                  <Filter className="w-4 h-4 text-slate-400" />
+                </div>
+                <select
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value as any)}
+                  className="bg-slate-800 border border-slate-700 text-slate-300 text-xs rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full pl-9 p-2 appearance-none cursor-pointer"
+                >
+                  <option value="all">All Tasks</option>
+                  <option value="active">Active</option>
+                  <option value="completed">Completed</option>
+                </select>
               </div>
-            ) : (
-              processedTasks.map(task => (
-                <TaskCard
-                  key={task.id}
-                  task={task}
-                  onToggle={toggleTask}
-                  onReadOut={playTTS}
-                  onUpdate={updateTask}
-                />
-              ))
-            )}
+              <div className="relative flex-1">
+                <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none">
+                  <ArrowUpDown className="w-4 h-4 text-slate-400" />
+                </div>
+                <select
+                  value={sort}
+                  onChange={(e) => setSort(e.target.value as any)}
+                  className="bg-slate-800 border border-slate-700 text-slate-300 text-xs rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-full pl-9 p-2 appearance-none cursor-pointer"
+                >
+                  <option value="newest">Newest</option>
+                  <option value="priority">Priority</option>
+                  <option value="date">Due Date</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-3 custom-scrollbar min-h-[300px]">
+              {processedTasks.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-slate-600">
+                  <p>{tasks.length === 0 ? "No tasks identified yet." : "No tasks match filter."}</p>
+                </div>
+              ) : (
+                processedTasks.map(task => (
+                  <TaskCard
+                    key={task.id}
+                    task={task}
+                    onToggle={toggleTask}
+                    onReadOut={playTTS}
+                    onUpdate={updateTask}
+                  />
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>
     </div>
   );
 };
-
 export default SmartTaskListener;

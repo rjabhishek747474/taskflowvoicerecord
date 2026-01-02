@@ -133,7 +133,7 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
             }
           },
           {
-            text: "Transcribe this audio. If the detected language is Hindi (or mixed Hindi/English), translate it fully into English. Return ONLY the English text without any additional commentary."
+            text: "Transcribe this audio exactly as spoken. The language may be English, Hindi, or a mix of both (Hinglish). If Hindi is spoken, you may transcribe it in Devanagari or Romanized script as appropriate for accuracy. Do not translate the entire text to English, preserve the original language. Return ONLY the transcript text."
           }
         ]
       }
@@ -173,8 +173,11 @@ export const analyzeTasksFromText = async (transcript: string): Promise<Task[]> 
   try {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
-      contents: `Analyze the following conversation transcript (which is in English). Extract actionable tasks. 
+      contents: `Analyze the following conversation transcript. The transcript may be in English, Hindi, or a mix of both. 
+      Extract actionable tasks.
       Prioritize them based on urgency and importance implied in the conversation.
+      
+      IMPORTANT: Even if the transcript is in Hindi, output the Task Title and Description in English for consistency.
       
       TRANSCRIPT:
       ${sanitizedTranscript}`,
@@ -204,7 +207,8 @@ export const analyzeTasksFromText = async (transcript: string): Promise<Task[]> 
 export const chatWithAssistant = async (
   message: string,
   history: any[],
-  location?: { lat: number; lng: number }
+  location?: { lat: number; lng: number },
+  context?: string
 ) => {
   validateApiKey();
   checkRateLimit('chat');
@@ -226,12 +230,27 @@ export const chatWithAssistant = async (
     tools.push({ googleMaps: {} });
   }
 
+  const systemInstruction = `
+    You are a helpful AI assistant.
+    ${context ? `CONTEXT FROM RECORDING HISTORY:\n${context}\n\nUser questions may be about the above context.` : ''}
+    
+    SPECIAL INSTRUCTION FOR TASK CREATION:
+    If the user's message implies creating a task (e.g., "create a task to...", "remind me to...", "add to my tasks..."), 
+    you MUST output the task details in the following strict format on a separate line:
+    [[TASK: Title | Description | Priority]]
+    
+    Priority must be one of: Critical, High, Medium, Low.
+    Example: [[TASK: Buy Milk | Get 2 gallons of whole milk | Medium]]
+    Do not mention you are creating a task in text if you use this format, just use the format.
+  `;
+
   try {
     const chat = ai.chats.create({
       model: 'gemini-2.5-flash',
       history: history,
       config: {
         tools: tools,
+        systemInstruction: systemInstruction, // Inject instructions
         toolConfig: location ? {
           retrievalConfig: {
             latLng: {
