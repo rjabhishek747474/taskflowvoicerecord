@@ -70,7 +70,7 @@ const App: React.FC = () => {
 
          {/* Footer */}
          <footer className="border-t border-slate-900 mt-12 py-8 text-center text-slate-500 text-sm">
-            <p>Powered by Gemini 2.5 Flash, Gemini 3.0 Pro, and the new Live API.</p>
+            <p>Powered by Artificial Intelligence, All Right Reserve TASKFLOW Copyright 2026.</p>
          </footer>
       </div>
    );

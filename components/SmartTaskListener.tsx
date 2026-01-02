@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Mic, Square, Loader2, Sparkles, AlertCircle, Filter, ArrowUpDown } from 'lucide-react';
+import { Mic, Square, Loader2, Sparkles, AlertCircle, Filter, ArrowUpDown, Plus } from 'lucide-react';
 import { transcribeAudio, analyzeTasksFromText, generateSpeechBase64 } from '../services/geminiService';
-import { Task, TaskPriority } from '../types';
+import { Task, TaskPriority, TaskRecurrence } from '../types';
 import TaskCard from './TaskCard';
+import TaskFormModal from './TaskFormModal';
 import { base64ToUint8Array, decodeAudioData } from '../services/audioUtils';
 import { db, Recording } from '../db';
 import HistoryViewer from './HistoryViewer';
@@ -19,13 +20,23 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
   const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
   const [sort, setSort] = useState<'newest' | 'priority' | 'date'>('newest');
 
+  // Modal State
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<Task | undefined>(undefined);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const [errorMsg, setErrorMsg] = useState('');
   const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
-    // Request notification permission on mount
+    // Load tasks from DB on mount
+    const loadTasks = async () => {
+      const storedTasks = await db.tasks.toArray();
+      setTasks(storedTasks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()));
+    };
+    loadTasks();
+
     if ("Notification" in window) {
       Notification.requestPermission();
     }
@@ -35,10 +46,36 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
     }
   }, []);
 
+  // Reminder Check Effect
+  useEffect(() => {
+    const checkReminders = () => {
+      const now = new Date();
+      tasks.forEach(task => {
+        if (!task.completed && task.reminderTime) {
+          const reminder = new Date(task.reminderTime);
+          // Check if due within the last minute (to avoid missed checks or double checks)
+          // Actually, if simply < now, we notify and clear.
+          if (reminder <= now) {
+            if (Notification.permission === 'granted') {
+              new Notification(`⏰ Reminder: ${task.title}`, {
+                body: task.description || 'Time to work on this task!',
+                icon: '/favicon.ico'
+              });
+            }
+            // Clear reminder so it doesn't trigger again
+            updateTask(task.id, { reminderTime: undefined });
+          }
+        }
+      });
+    };
+    const interval = setInterval(checkReminders, 10000); // Check every 10s
+    return () => clearInterval(interval);
+  }, [tasks]);
+
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' }); // webm is widely supported for recording
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
 
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
@@ -65,7 +102,6 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
     if (mediaRecorderRef.current && isRecording) {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
-      // Stop all tracks
       mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
     }
   };
@@ -75,31 +111,30 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
     const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
 
     try {
-      // 1. Transcribe (Flash)
+      // 1. Transcribe
       const text = await transcribeAudio(audioBlob);
       setTranscript(text);
 
-      // 2. Think & Analyze (Pro)
+      // 2. Analyze
       setProcessingState('thinking');
       const extractedTasks = await analyzeTasksFromText(text);
 
-      setTasks(prev => [...extractedTasks, ...prev]); // Add new tasks to top
+      setTasks(prev => [...extractedTasks, ...prev]);
 
-      // 3. Save to History (DB)
-      const newRecordingId = await db.recordings.add({
+      // 3. Save to History
+      await db.recordings.add({
         transcript: text,
         timestamp: new Date().toISOString(),
         summary: extractedTasks.length > 0 ? `Detected ${extractedTasks.length} tasks` : undefined
       });
 
-      // Save extracted tasks
       if (extractedTasks.length > 0) {
         await db.tasks.bulkAdd(extractedTasks);
       }
 
       setProcessingState('done');
 
-      // 4. Notify high priority
+      // 4. Notify
       const criticalTasks = extractedTasks.filter(t => t.priority === 'Critical' || t.priority === 'High');
       if (criticalTasks.length > 0 && Notification.permission === "granted") {
         new Notification("New High Priority Tasks Detected", {
@@ -109,17 +144,12 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
 
     } catch (err: any) {
       console.error("Processing failed", err);
-
-      // Provide specific error messages for common issues
       let errorMessage = "Failed to process audio. Please try again.";
       if (err?.message?.includes('API_KEY_MISSING')) {
         errorMessage = "⚠️ API key missing! Add GEMINI_API_KEY to .env.local file.";
-      } else if (err?.message?.includes('API_KEY_INVALID') || err?.message?.includes('API key not valid')) {
+      } else if (err?.message?.includes('API_KEY_INVALID')) {
         errorMessage = "⚠️ Invalid API key! Check your GEMINI_API_KEY in .env.local";
-      } else if (err?.message?.includes('network') || err?.name === 'TypeError') {
-        errorMessage = "Network error. Please check your internet connection.";
       }
-
       setErrorMsg(errorMessage);
       setProcessingState('error');
     }
@@ -140,51 +170,109 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
     }
   }
 
-  const toggleTask = (id: string) => {
-    setTasks(tasks.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
-    // Update DB (optimistic)
+  const toggleTask = async (id: string) => {
     const task = tasks.find(t => t.id === id);
-    if (task) {
-      db.tasks.update(id, { completed: !task.completed });
+    if (!task) return;
+
+    const newCompleted = !task.completed;
+
+    // Recurrence Logic
+    if (newCompleted && task.recurrence) {
+      const nextDate = new Date(task.dueDate || Date.now());
+      switch (task.recurrence) {
+        case TaskRecurrence.HOURLY: nextDate.setHours(nextDate.getHours() + 1); break;
+        case TaskRecurrence.DAILY: nextDate.setDate(nextDate.getDate() + 1); break;
+        case TaskRecurrence.WEEKLY: nextDate.setDate(nextDate.getDate() + 7); break;
+        case TaskRecurrence.MONTHLY: nextDate.setMonth(nextDate.getMonth() + 1); break;
+        case TaskRecurrence.YEARLY: nextDate.setFullYear(nextDate.getFullYear() + 1); break;
+      }
+
+      const newTask: Task = {
+        ...task,
+        id: crypto.randomUUID(),
+        dueDate: nextDate.toISOString(),
+        completed: false,
+        createdAt: new Date().toISOString(),
+        // Clean slate for new instance
+        startedAt: null,
+        timeSpent: 0
+      };
+
+      await db.tasks.add(newTask);
+      setTasks(prev => [newTask, ...prev]);
+
+      if (Notification.permission === 'granted') {
+        new Notification("Returning Task Scheduled", { body: `Scheduled next instance of: ${task.title}` });
+      }
     }
+
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, completed: newCompleted } : t));
+    db.tasks.update(id, { completed: newCompleted });
   };
 
   const updateTask = (id: string, updates: Partial<Task>) => {
-    setTasks(tasks.map(t => t.id === id ? { ...t, ...updates } : t));
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
     db.tasks.update(id, updates);
+  };
+
+  const deleteTask = (id: string) => {
+    setTasks(prev => prev.filter(t => t.id !== id));
+    db.tasks.delete(id);
+  };
+
+  const handleOpenAddModal = () => {
+    setEditingTask(undefined);
+    setIsModalOpen(true);
+  };
+
+  const handleOpenEditModal = (task: Task) => {
+    setEditingTask(task);
+    setIsModalOpen(true);
+  };
+
+  const handleSaveModal = async (updates: Partial<Task>) => {
+    if (editingTask) {
+      updateTask(editingTask.id, updates);
+    } else {
+      // Create new
+      const newTask: Task = {
+        id: crypto.randomUUID(),
+        title: updates.title || 'Untitled Task',
+        description: updates.description || '',
+        priority: updates.priority || TaskPriority.MEDIUM,
+        completed: false,
+        createdAt: new Date().toISOString(),
+        dueDate: updates.dueDate,
+        reminderTime: updates.reminderTime,
+        recurrence: updates.recurrence,
+        assignee: 'Me',
+        timeSpent: 0
+      };
+      await db.tasks.add(newTask);
+      setTasks(prev => [newTask, ...prev]);
+    }
   };
 
   const handleHistorySelect = (rec: Recording) => {
     setTranscript(rec.transcript);
-    // Note: We don't verify if tasks belong to recording yet as we don't link them perfectly in schema
-    // But for now, we just show the transcript.
-    // In future, link tasks to recordingId.
   };
 
   const processedTasks = useMemo(() => {
     let result = [...tasks];
+    if (filter === 'active') result = result.filter(t => !t.completed);
+    else if (filter === 'completed') result = result.filter(t => t.completed);
 
-    // Filter
-    if (filter === 'active') {
-      result = result.filter(t => !t.completed);
-    } else if (filter === 'completed') {
-      result = result.filter(t => t.completed);
-    }
-
-    // Sort
     if (sort === 'priority') {
       const pOrder = { [TaskPriority.CRITICAL]: 0, [TaskPriority.HIGH]: 1, [TaskPriority.MEDIUM]: 2, [TaskPriority.LOW]: 3 };
       result.sort((a, b) => pOrder[a.priority] - pOrder[b.priority]);
     } else if (sort === 'date') {
       result.sort((a, b) => {
         if (a.dueDate && b.dueDate) return a.dueDate.localeCompare(b.dueDate);
-        if (a.dueDate) return -1; // Dates come first
+        if (a.dueDate) return -1;
         if (b.dueDate) return 1;
         return 0;
       });
     }
-    // 'newest' is default (array order)
-
     return result;
   }, [tasks, filter, sort]);
 
@@ -199,7 +287,13 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col gap-6 overflow-y-auto pr-2 custom-scrollbar">
+      <div className="flex-1 flex flex-col gap-6 overflow-y-auto pr-2 custom-scrollbar relative">
+        <TaskFormModal
+          isOpen={isModalOpen}
+          onClose={() => setIsModalOpen(false)}
+          onSave={handleSaveModal}
+          initialTask={editingTask}
+        />
 
         <div className="text-center mb-4">
           <h2 className="text-3xl font-bold mb-4 bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
@@ -224,6 +318,15 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
               </button>
             )}
           </div>
+
+          {/* Add Task Button */}
+          <button
+            onClick={handleOpenAddModal}
+            className="absolute top-0 right-0 p-3 bg-indigo-600 rounded-full shadow-lg hover:bg-indigo-500 transition-colors z-10"
+            title="Manually Add Task"
+          >
+            <Plus className="w-6 h-6 text-white" />
+          </button>
 
           {processingState !== 'idle' && processingState !== 'done' && processingState !== 'error' && (
             <div className="flex flex-col items-center gap-3 animate-fade-in p-4 bg-slate-900/80 rounded-xl border border-indigo-500/30 backdrop-blur-sm max-w-sm mx-auto">
@@ -309,6 +412,8 @@ const SmartTaskListener: React.FC<SmartTaskListenerProps> = ({ onChatRequest }) 
                     onToggle={toggleTask}
                     onReadOut={playTTS}
                     onUpdate={updateTask}
+                    onDelete={deleteTask}
+                    onEditRequest={handleOpenEditModal}
                   />
                 ))
               )}

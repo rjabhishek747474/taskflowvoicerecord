@@ -29,6 +29,11 @@ export class TaskFlowDatabase extends Dexie {
             tasks: 'id, priority, completed, createdAt, [completed+priority]', // Compound index for filtering
             chats: '++id, recordingId, timestamp'
         });
+
+        // Version 2: Add reminderTime index
+        this.version(2).stores({
+            tasks: 'id, priority, completed, createdAt, reminderTime, [completed+priority]'
+        });
     }
 }
 
