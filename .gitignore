@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Security & Local DB
+.env
+.env.production
+better-auth.db
+better-auth.db-journal

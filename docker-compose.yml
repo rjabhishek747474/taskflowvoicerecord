@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - BETTER_AUTH_SECRET=should_be_in_env_file
+      - BETTER_AUTH_URL=http://localhost:3001
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./better-auth.db:/app/better-auth.db
+    restart: always

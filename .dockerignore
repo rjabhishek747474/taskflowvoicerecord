@@ -1,0 +1,8 @@
+node_modules
+dist
+.git
+.env
+.env.local
+better-auth.db
+better-auth.db-journal
+test-results
